@@ -1,0 +1,13 @@
+.venv/
+.env
+
+chroma_db/
+ChromaDB/
+
+__pycache__/
+*.py[cod]
+
+.vscode/
+.idea/
+
+tempCodeRunnerFile.py
