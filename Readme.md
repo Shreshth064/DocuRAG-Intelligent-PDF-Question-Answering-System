@@ -3,16 +3,17 @@
 DocuRAG is a simple **Retrieval-Augmented Generation (RAG)** project
 that allows users to ask questions about the contents of a PDF document.
 
-The project is built around two main steps:
+The retrieval logic lives in a reusable **`rag/` package**, and three
+thin entry points sit on top of it:
 
 1.  **`create_database.py`** --- reads a PDF, splits it into chunks,
     creates embeddings, and stores them in ChromaDB.
-2.  **`main.py`** --- loads the ChromaDB vector database, retrieves
-    relevant document chunks, and uses an LLM to answer questions based
-    on the retrieved context.
+2.  **`main.py`** --- a command-line chat over the stored document.
+3.  **`app.py`** --- a Streamlit web app that does both: upload a PDF,
+    build the store, then ask questions.
 
-The project demonstrates the core workflow behind a document-based RAG
-system.
+All three share the same engine, so the CLI and the web app can never
+drift apart. See [Architecture](#️-architecture) for the class design.
 
 ------------------------------------------------------------------------
 
@@ -104,9 +105,27 @@ research papers, manuals, and other PDF documents.
 ``` text
 DocuRAG-Intelligent-PDF-Question-Answering-System/
 │
-├── create_database.py
-├── main.py
+├── rag/                     ← reusable engine (all the logic lives here)
+│   ├── __init__.py
+│   ├── config.py            ← RAGConfig
+│   ├── ingestion.py         ← DocumentIngestor
+│   ├── knowledge_base.py    ← KnowledgeBase
+│   └── pipeline.py          ← RAGPipeline, Answer
+│
+├── create_database.py       ← entry point: build the vector store
+├── main.py                  ← entry point: command-line chat
+├── app.py                   ← entry point: Streamlit web app
+│
+├── tests/                   ← pytest suite (offline, no API keys)
+│   ├── conftest.py
+│   ├── test_config.py
+│   ├── test_ingestion.py
+│   ├── test_knowledge_base.py
+│   └── test_pipeline.py
+│
+├── pyproject.toml           ← pytest + coverage configuration
 ├── requirements.txt
+├── requirements-dev.txt
 ├── .gitignore
 │
 ├── document loader/
@@ -121,66 +140,98 @@ DocuRAG-Intelligent-PDF-Question-Answering-System/
 
 ------------------------------------------------------------------------
 
+# 🏗️ Architecture
+
+All of the logic lives in the `rag/` package. The three scripts at the
+root (`create_database.py`, `main.py`, `app.py`) are thin frontends that
+share one engine, so the CLI and the web app can never drift apart.
+
+``` text
+        create_database.py     main.py        app.py
+          (build store)        (CLI)       (Streamlit)
+                 │               │              │
+                 └───────────────┼──────────────┘
+                                 ▼
+                        ┌─────────────────┐
+                        │   RAGPipeline   │  ask() -> Answer
+                        └────────┬────────┘
+                       composes  │
+                 ┌───────────────┴───────────────┐
+                 ▼                               ▼
+        ┌─────────────────┐            ┌──────────────────┐
+        │  KnowledgeBase  │            │  ChatGoogle-     │
+        │  embeddings +   │            │  GenerativeAI    │
+        │  Chroma store   │            └──────────────────┘
+        └────────┬────────┘
+                 ▲
+        ┌────────┴────────┐          ┌──────────────────┐
+        │ DocumentIngestor│          │    RAGConfig     │
+        │  PDF -> chunks  │◄─────────│  every tunable   │
+        └─────────────────┘          └──────────────────┘
+```
+
+  Class               Responsibility
+  ------------------- ----------------------------------------------------
+  `RAGConfig`         Frozen dataclass holding every tunable (models, paths, chunk size, retrieval settings)
+  `DocumentIngestor`  Loads a PDF and splits it into overlapping chunks
+  `KnowledgeBase`     Owns the embedding model and the Chroma vector store; builds it, opens it, exposes a retriever
+  `RAGPipeline`       Composes retriever + prompt + LLM into `ask()`
+  `Answer`            Immutable result carrying the generated text and the source documents
+
+### Design notes
+
+-   **Encapsulation** --- callers never touch `Chroma` or the embedding
+    client directly; `KnowledgeBase` opens the store lazily on first use.
+-   **Composition over inheritance** --- `RAGPipeline` *has a* retriever
+    and *has an* LLM rather than inheriting from either.
+-   **Dependency injection** --- `RAGPipeline(retriever=..., llm=...)`
+    takes its collaborators as arguments. `from_config()` is a factory
+    classmethod that wires the real ones, while tests pass fakes. This is
+    what makes the pipeline testable without an API key.
+-   **One source of truth** --- every magic number lives in `RAGConfig`.
+    The frontends override only what they need
+    (`RAGConfig(persist_directory="chroma_db")` in the Streamlit app).
+
+------------------------------------------------------------------------
+
 # ⚙️ `create_database.py`
 
 The purpose of `create_database.py` is to convert the PDF document into
 a searchable vector database.
 
-### Step 1 --- Load the PDF
+### Step 1 --- Load and Split the PDF
 
-The project uses LangChain's `PyPDFLoader`:
-
-``` python
-data = PyPDFLoader("document loader/deeplearning.pdf")
-docs = data.load()
-```
-
-This extracts the text and metadata from the PDF.
-
-### Step 2 --- Split the Document
-
-Large documents are divided into smaller chunks:
+`DocumentIngestor` wraps LangChain's `PyPDFLoader` and
+`RecursiveCharacterTextSplitter` behind one call:
 
 ``` python
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=200
-)
-
-chunks = splitter.split_documents(docs)
+chunks = DocumentIngestor(config).ingest("document loader/deeplearning.pdf")
 ```
 
-The overlap helps maintain context between neighboring chunks.
+Internally that is still load-then-split, and both steps stay available
+separately (`.load()` and `.split()`) when you need them. The chunk size
+and overlap come from `RAGConfig`, so the overlap that preserves context
+between neighbouring chunks is configured in exactly one place.
 
-### Step 3 --- Generate Embeddings
+### Step 2 --- Embed and Store the Chunks
 
-The project uses the Hugging Face embedding model:
-
-``` text
-BAAI/bge-m3
-```
-
-Example:
+`KnowledgeBase` owns both the embedding model and the Chroma store, so a
+single call embeds the chunks and persists them:
 
 ``` python
-emb_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-m3"
-)
+KnowledgeBase(config).build(chunks)
 ```
 
-The embedding model converts each text chunk into a numerical vector.
-
-### Step 4 --- Store Vectors in ChromaDB
-
-The embeddings and document chunks are stored in ChromaDB:
+Embeddings are generated through the **Hugging Face Inference API** using
+`BAAI/bge-m3`, so the model is never downloaded to your machine --- it
+only needs a `HUGGINGFACEHUB_API_TOKEN`:
 
 ``` python
-vectorstore = Chroma.from_documents(
-    documents=chunks,
-    embedding=emb_model,
-    persist_directory="ChromaDB"
-)
+HuggingFaceEndpointEmbeddings(model="BAAI/bge-m3")
 ```
+
+The embedding model converts each text chunk into a numerical vector, and
+Chroma writes those vectors to `config.persist_directory`.
 
 After running this script, the document can be searched semantically
 instead of using simple keyword matching.
@@ -192,70 +243,46 @@ instead of using simple keyword matching.
 The `main.py` file loads the previously created ChromaDB and provides an
 interactive command-line RAG system.
 
-### Step 1 --- Load the Embedding Model
+### Step 1 --- Build the Pipeline
 
-The same embedding model used during database creation must be used when
-querying the database:
-
-``` python
-emb_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-m3"
-)
-```
-
-### Step 2 --- Load ChromaDB
-
-The stored vector database is opened:
+Because `RAGConfig` holds the embedding model, the store location and the
+retrieval settings, the whole system is wired up in one line:
 
 ``` python
-vectorstore = Chroma(
-    persist_directory="ChromaDB",
-    embedding_function=emb_model
-)
+pipeline = RAGPipeline.from_config()
 ```
 
-### Step 3 --- Create the Retriever
+This guarantees the query side uses the *same* embedding model as the
+build side --- a mismatch there silently returns nonsense, and keeping
+both in one config makes it impossible.
 
-The project uses **MMR (Maximal Marginal Relevance)** retrieval:
+### Step 2 --- Retrieval
 
-``` python
-retriever = vectorstore.as_retriever(
-    search_type="mmr",
-    search_kwargs={
-        "k": 4,
-        "fetch_k": 10,
-        "lambda_mult": 0.5
-    }
-)
-```
+Under the hood `KnowledgeBase.as_retriever()` uses
+**MMR (Maximal Marginal Relevance)** with the settings from the config
+(`k=4`, `fetch_k=10`, `lambda_mult=0.5`).
 
 MMR attempts to retrieve information that is both:
 
 -   Relevant to the question
 -   Diverse enough to avoid returning nearly identical chunks
 
-### Step 4 --- Send Context to the LLM
-
-When the user asks a question, the system retrieves relevant chunks:
+### Step 3 --- Ask a Question
 
 ``` python
-docs = retriever.invoke(query)
+answer = pipeline.ask("What is deep learning?")
+
+print(answer.text)     # the generated answer
+print(answer.pages)    # page numbers the answer was drawn from
 ```
 
-The retrieved text is then placed into the prompt:
+`ask()` retrieves the chunks, formats them into the prompt, calls Gemini,
+and returns an `Answer` object carrying both the text and the source
+documents it used --- so the caller can cite pages without re-running the
+retrieval.
 
-``` text
-Context:
-<retrieved document chunks>
-
-Question:
-<user question>
-```
-
-The LLM is instructed to answer using the supplied context.
-
-If the information is not available in the document, the prompt tells
-the model to respond:
+The prompt instructs the LLM to answer using only the supplied context.
+If the information is not in the document, the model is told to respond:
 
 ``` text
 I could not find the answer in the document.
@@ -276,6 +303,10 @@ I could not find the answer in the document.
   ChromaDB                         Vector database
   Google Gemini                    LLM for answer generation
   python-dotenv                    Environment variable management
+  Streamlit                        Web interface
+  pytest                           Test suite
+  pytest-cov                       Coverage measurement
+  GitHub Actions                   Continuous integration
 
 ------------------------------------------------------------------------
 
@@ -321,17 +352,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+To also install the test tooling:
+
+``` bash
+pip install -r requirements-dev.txt
+```
+
 ------------------------------------------------------------------------
 
 # 🔐 Environment Variables
 
-Create a `.env` file in the project root.
-
-For the Google Gemini implementation, configure your Google API key:
+Create a `.env` file in the project root:
 
 ``` env
 GOOGLE_API_KEY=your_google_api_key
+HUGGINGFACEHUB_API_TOKEN=your_hugging_face_token
 ```
+
+-   `GOOGLE_API_KEY` --- used by Gemini to generate answers.
+-   `HUGGINGFACEHUB_API_TOKEN` --- used to call the Hugging Face
+    Inference API for embeddings. Because embeddings run through the API,
+    the `BAAI/bge-m3` model is **not** downloaded to your machine.
+    Get a token at <https://huggingface.co/settings/tokens>.
 
 **Never upload `.env` to GitHub.**
 
@@ -394,6 +436,83 @@ To exit:
 0
 ```
 
+## Step 3 --- (Optional) Run the Web App
+
+``` bash
+streamlit run app.py
+```
+
+Upload a PDF, click **Create Vector Database**, then ask questions. The
+web app uses its own store (`chroma_db/`) so uploads never mix with the
+corpus built by `create_database.py`.
+
+------------------------------------------------------------------------
+
+# 🧪 Tests
+
+The pipeline takes its retriever and LLM as constructor arguments, so the
+whole suite runs against fakes --- **no API keys, no network calls, no
+cost**. 31 tests, 100% branch coverage of the `rag/` package, under a
+second to run.
+
+### Install and run
+
+``` bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+With a coverage report:
+
+``` bash
+pytest --cov
+```
+
+### Layout
+
+``` text
+tests/
+├── conftest.py              ← shared fixtures and offline test doubles
+├── test_config.py           ← RAGConfig: defaults, immutability, overrides
+├── test_ingestion.py        ← DocumentIngestor: chunking, overlap, real PDF
+├── test_knowledge_base.py   ← KnowledgeBase: build, persist, reopen, retrieve
+└── test_pipeline.py         ← RAGPipeline + Answer: prompt, sources, pages
+```
+
+### Test doubles
+
+`conftest.py` provides three fakes, all deterministic and offline:
+
+  Double            Replaces                    Why
+  ----------------- --------------------------- ---------------------------------
+  `HashEmbeddings`  Hugging Face Inference API  Real embeddings need a token and aren't reproducible
+  `FakeLLM`         Gemini                      Records the prompt it receives so tests can assert on the context
+  `FakeRetriever`   Chroma retriever            Returns a fixed document set and records the question it was asked
+
+### Markers
+
+Tests that write a real Chroma store to a temp directory are marked
+`integration` (still offline --- they use `HashEmbeddings`):
+
+``` bash
+pytest -m "not integration"   # fast unit tests only
+pytest -m integration         # storage round-trip tests only
+```
+
+### Strictness
+
+`pyproject.toml` sets `filterwarnings = error`, so a new deprecation from
+LangChain or Chroma **fails the build** instead of scrolling past. Known
+third-party warnings are explicitly allow-listed with a comment
+explaining each one.
+
+### Continuous integration
+
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs the
+suite on every push and pull request across Python 3.11, 3.12 and 3.13.
+No secrets are configured in CI on purpose --- if a test ever needs an
+API key, the build breaks, which keeps the suite honest.
+
 ------------------------------------------------------------------------
 
 # 🔄 Complete Workflow
@@ -440,6 +559,8 @@ To exit:
 This project demonstrates several important concepts in modern AI
 application development:
 
+**AI / retrieval**
+
 -   Retrieval-Augmented Generation (RAG)
 -   Vector embeddings
 -   Semantic search
@@ -450,6 +571,19 @@ application development:
 -   Prompt engineering
 -   LLM integration
 -   PDF document processing
+
+**Software design**
+
+-   Object-oriented design (encapsulation, composition, single
+    responsibility)
+-   Dependency injection and factory methods
+-   Immutable value objects (`RAGConfig`, `Answer` as frozen dataclasses)
+-   Separation of concerns --- one engine, three interchangeable frontends
+-   Centralised configuration instead of scattered constants
+-   Unit testing with pytest --- fixtures, markers, parametrised doubles
+-   100% branch coverage of the core package, enforced offline in CI
+-   Warnings-as-errors so upstream deprecations fail the build
+-   Type hints throughout
 
 ------------------------------------------------------------------------
 
