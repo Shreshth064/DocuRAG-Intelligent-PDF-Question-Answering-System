@@ -1,17 +1,20 @@
 from dotenv import load_dotenv
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-load_dotenv()
 
-data=PyPDFLoader("document loader/deeplearning.pdf")
-da = data.load()
-splitter=RecursiveCharacterTextSplitter(chunk_size=1000,chunk_overlap=200)
-chunk=splitter.split_documents(documents=da)
+from rag import DocumentIngestor, KnowledgeBase, RAGConfig
+
+PDF_PATH = "document loader/deeplearning.pdf"
 
 
+def main() -> None:
+    load_dotenv()
+    config = RAGConfig()
 
-emb_model=HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
-vectorstore=Chroma.from_documents(documents=chunk,embedding=emb_model,persist_directory="ChromaDB")
+    chunks = DocumentIngestor(config).ingest(PDF_PATH)
+    print(f"Split into {len(chunks)} chunks")
+
+    KnowledgeBase(config).build(chunks)
+    print(f"Vector database written to {config.persist_directory}")
+
+
+if __name__ == "__main__":
+    main()
