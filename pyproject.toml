@@ -1,0 +1,29 @@
+[tool.pytest.ini_options]
+# Makes `pytest` work from the project root without setting PYTHONPATH.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: exercises a real Chroma store on disk (still offline, no API keys)",
+]
+filterwarnings = [
+    "error",
+    # Only PyPDFLoader still comes from langchain-community; there is no
+    # official standalone replacement package for it yet.
+    "ignore:.*langchain-community.* is being sunset.*:DeprecationWarning",
+    # Third-party warnings about future Python versions, not our code.
+    "ignore:.*asyncio.iscoroutinefunction.* is deprecated.*:DeprecationWarning",
+    "ignore:.*_UnionGenericAlias.* is deprecated.*:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["rag"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
