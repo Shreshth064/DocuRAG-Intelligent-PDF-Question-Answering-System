@@ -3,9 +3,10 @@ python-dotenv
 langchain
 langchain-community
 langchain-core
+langchain-chroma
 langchain-huggingface
 langchain-google-genai
 langchain-text-splitters
 chromadb
-sentence-transformers
+huggingface_hub
 pypdf
