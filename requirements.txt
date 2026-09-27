@@ -1,4 +1,5 @@
 streamlit
+flask
 python-dotenv
 langchain
 langchain-community

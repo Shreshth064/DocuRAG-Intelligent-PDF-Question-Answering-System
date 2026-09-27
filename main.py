@@ -1,10 +1,12 @@
 from dotenv import load_dotenv
 
 from rag import RAGPipeline
+from rag.environment import require
 
 
 def main() -> None:
     load_dotenv()
+    require("GOOGLE_API_KEY", "HUGGINGFACEHUB_API_TOKEN")
     pipeline = RAGPipeline.from_config()
 
     print("rag system")

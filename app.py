@@ -5,6 +5,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from rag import DocumentIngestor, KnowledgeBase, RAGConfig, RAGPipeline
+from rag.environment import describe, missing
 
 # Look for .env next to this script, regardless of the working directory
 # `streamlit run` is launched from.
@@ -13,6 +14,11 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 # Uploaded PDFs get their own store so they never mix with the corpus
 # built by create_database.py.
 CONFIG = RAGConfig(persist_directory="chroma_db")
+
+absent = missing("GOOGLE_API_KEY", "HUGGINGFACEHUB_API_TOKEN")
+if absent:
+    st.error(describe(absent))
+    st.stop()
 
 
 @st.cache_resource
