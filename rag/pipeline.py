@@ -11,6 +11,26 @@ from .knowledge_base import KnowledgeBase
 
 NOT_FOUND_MESSAGE = "I could not find the answer in the document."
 
+
+def _as_text(content) -> str:
+    """Flatten an LLM response's content into a plain string.
+
+    A chat model may return either a string or, for models that emit
+    structured content (e.g. Gemini's thinking blocks), a list of parts
+    that are strings or ``{"type": ..., "text": ...}`` dicts. Callers of the
+    API expect a single answer string, so the text parts are concatenated
+    and anything without text (an image part, a signature) is dropped.
+    """
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and "text" in block:
+            parts.append(block["text"])
+    return "".join(parts)
+
 DEFAULT_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
@@ -74,4 +94,4 @@ class RAGPipeline:
         response = self._llm.invoke(
             self._prompt.invoke({"context": context, "question": question})
         )
-        return Answer(text=response.content, sources=sources)
+        return Answer(text=_as_text(response.content), sources=sources)

@@ -4,7 +4,7 @@ import pytest
 from langchain_core.documents import Document
 
 from rag import Answer, RAGPipeline
-from rag.pipeline import NOT_FOUND_MESSAGE
+from rag.pipeline import NOT_FOUND_MESSAGE, _as_text
 
 
 def test_ask_returns_the_llm_reply(make_pipeline):
@@ -120,6 +120,37 @@ def test_a_custom_prompt_can_be_injected(make_pipeline):
     pipeline.ask("question?")
 
     assert llm.rendered_prompt.startswith("Human: CUSTOM alpha :: question?")
+
+
+# --- structured-content flattening ---
+
+def test_as_text_passes_through_a_plain_string():
+    assert _as_text("just a string") == "just a string"
+
+
+def test_as_text_joins_structured_content_blocks():
+    # Mirrors Gemini's structured output: text parts kept, everything else
+    # (a string part, a text dict, an image dict, a non-string/dict) folded
+    # into the two branches that keep text and the two that drop it.
+    content = [
+        "lead ",
+        {"type": "text", "text": "answer body"},
+        {"type": "image", "url": "http://x"},
+        {"type": "thinking", "signature": "abc"},
+        42,
+    ]
+
+    assert _as_text(content) == "lead answer body"
+
+
+def test_ask_flattens_structured_llm_content(make_pipeline):
+    from langchain_core.documents import Document
+
+    pipeline, llm, _ = make_pipeline([Document(page_content="alpha")])
+    # Make the fake LLM return blocks the way Gemini does.
+    llm.reply = [{"type": "text", "text": "flattened"}]
+
+    assert pipeline.ask("question?").text == "flattened"
 
 
 def test_from_config_builds_a_usable_pipeline(config, monkeypatch):
