@@ -1,0 +1,66 @@
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    # Distinct image name per service. api and ui build the same runtime
+    # stage but must not share a tag, or a parallel `docker compose build`
+    # races two writes to one tag ("image already exists").
+    image: docurag-api:latest
+    ports:
+      - "8000:8000"
+    # Keys are injected at runtime. They are never copied into the image
+    # (.env is in .dockerignore and no ARG/ENV carries them at build time).
+    env_file:
+      - .env
+    volumes:
+      # RAGConfig.persist_directory defaults to "ChromaDB", so this is
+      # the store the API reads and writes.
+      - api-store:/app/ChromaDB
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      target: runtime
+    image: docurag-ui:latest
+    command:
+      - streamlit
+      - run
+      - app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      # app.py hardcodes RAGConfig(persist_directory="chroma_db"), a
+      # different store from the API's. They are kept as separate volumes
+      # so Streamlit uploads stay out of the API's corpus (current
+      # behaviour) and two processes never write one SQLite file.
+      - ui-store:/app/chroma_db
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # Runs the suite inside the image so CI can reuse exactly what ships.
+  # Under a profile so `docker compose up` does not start it.
+  #   docker compose run --rm test
+  test:
+    build:
+      context: .
+      target: test
+    image: docurag-test:latest
+    profiles: ["test"]
+    # No env_file: the suite must stay runnable with no credentials.
+    command: ["pytest", "--cov"]
+
+volumes:
+  api-store:
+  ui-store:
