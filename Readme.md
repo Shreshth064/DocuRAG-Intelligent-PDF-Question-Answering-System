@@ -110,7 +110,8 @@ DocuRAG-Intelligent-PDF-Question-Answering-System/
 │   ├── config.py            ← RAGConfig
 │   ├── ingestion.py         ← DocumentIngestor
 │   ├── knowledge_base.py    ← KnowledgeBase
-│   └── pipeline.py          ← RAGPipeline, Answer
+│   ├── pipeline.py          ← RAGPipeline, Answer
+│   └── api.py               ← Flask REST API (thin adapter over the engine)
 │
 ├── create_database.py       ← entry point: build the vector store
 ├── main.py                  ← entry point: command-line chat
@@ -121,7 +122,8 @@ DocuRAG-Intelligent-PDF-Question-Answering-System/
 │   ├── test_config.py
 │   ├── test_ingestion.py
 │   ├── test_knowledge_base.py
-│   └── test_pipeline.py
+│   ├── test_pipeline.py
+│   └── test_api.py
 │
 ├── pyproject.toml           ← pytest + coverage configuration
 ├── requirements.txt
@@ -304,6 +306,7 @@ I could not find the answer in the document.
   Google Gemini                    LLM for answer generation
   python-dotenv                    Environment variable management
   Streamlit                        Web interface
+  Flask                            REST API
   pytest                           Test suite
   pytest-cov                       Coverage measurement
   GitHub Actions                   Continuous integration
@@ -446,13 +449,74 @@ Upload a PDF, click **Create Vector Database**, then ask questions. The
 web app uses its own store (`chroma_db/`) so uploads never mix with the
 corpus built by `create_database.py`.
 
+## Step 4 --- (Optional) Run the REST API
+
+``` bash
+python -m rag.api
+```
+
+This starts a Flask server on port 8000. It is a thin adapter over the
+same `rag/` engine --- no pipeline logic is duplicated. The embedding
+client, the Chroma store and the LLM are constructed **once at startup**,
+never per request; after an upload, only the lightweight pipeline wrapper
+is re-pointed at the new store.
+
+> The server constructs the Gemini client eagerly at startup, so it
+> **fails fast** if `GOOGLE_API_KEY` is missing rather than serving while
+> unable to answer.
+
+### Endpoints
+
+  Method &amp; path    Request                        Success        Errors
+  ---------------- ------------------------------ -------------- -------------------------
+  `GET /health`    none                           `200` `{"status":"ok"}`  ---
+  `POST /upload`   `multipart/form-data`, `file`  `201` `{"chunks": N}`    `400` no file · `415` not a PDF · `413` too large · `500` ingest failed
+  `POST /query`    JSON `{"question": "..."}`      `200` answer + `pages`  `400` empty question · `404` no store yet · `500` query failed
+
+`/health` touches no dependencies, so it is safe for container
+healthchecks. Every response --- including errors --- is JSON; a single
+error handler converts the API's typed exceptions into a structured
+`{"error": "..."}` body and never leaks a stack trace.
+
+### Example
+
+``` bash
+# 1. build the store from a PDF
+curl -F "file=@book.pdf" http://localhost:8000/upload
+# -> {"chunks": 42}
+
+# 2. ask a question
+curl -X POST http://localhost:8000/query \
+     -H "Content-Type: application/json" \
+     -d '{"question": "What is deep learning?"}'
+# -> {"answer": "...", "pages": [3, 7], "num_sources": 4}
+```
+
+### Safety notes
+
+-   Uploaded files are validated by their **magic bytes** (`%PDF-`), not
+    by the client-supplied name or content type.
+-   Filenames are sanitised with `werkzeug.utils.secure_filename`, and
+    the temp file is written to an OS temp path and deleted in a
+    `finally` block whether ingestion succeeds or fails.
+-   `MAX_CONTENT_LENGTH` caps the request body so oversized uploads are
+    rejected (`413`) before being read into memory.
+
+### Application-factory pattern
+
+`create_app(config=None, knowledge_base=None, llm=None)` mirrors the
+project's dependency-injection style: production passes nothing and the
+real components are built; tests inject a `KnowledgeBase` over fake
+embeddings and a fake LLM, so the entire API is exercised offline in
+`tests/test_api.py`.
+
 ------------------------------------------------------------------------
 
 # 🧪 Tests
 
 The pipeline takes its retriever and LLM as constructor arguments, so the
 whole suite runs against fakes --- **no API keys, no network calls, no
-cost**. 31 tests, 100% branch coverage of the `rag/` package, under a
+cost**. 48 tests, 100% branch coverage of the `rag/` package, under a
 second to run.
 
 ### Install and run
@@ -476,7 +540,8 @@ tests/
 ├── test_config.py           ← RAGConfig: defaults, immutability, overrides
 ├── test_ingestion.py        ← DocumentIngestor: chunking, overlap, real PDF
 ├── test_knowledge_base.py   ← KnowledgeBase: build, persist, reopen, retrieve
-└── test_pipeline.py         ← RAGPipeline + Answer: prompt, sources, pages
+├── test_pipeline.py         ← RAGPipeline + Answer: prompt, sources, pages
+└── test_api.py              ← Flask endpoints: status codes, upload, query
 ```
 
 ### Test doubles
