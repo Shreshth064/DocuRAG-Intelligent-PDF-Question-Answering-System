@@ -8,12 +8,20 @@ from rag.pipeline import NOT_FOUND_MESSAGE
 
 
 @pytest.fixture
-def app(config, embeddings):
-    """A fully offline app: real KnowledgeBase over fake embeddings, fake LLM."""
+def app(config, embeddings, fake_redis):
+    """A fully offline app: real KnowledgeBase over fake embeddings, fake LLM,
+    and a query cache over an in-memory fake Redis."""
     from conftest import FakeLLM
 
+    from rag.cache import QueryCache
+
     knowledge_base = KnowledgeBase(config, embeddings=embeddings)
-    return create_app(config=config, knowledge_base=knowledge_base, llm=FakeLLM("stub answer"))
+    return create_app(
+        config=config,
+        knowledge_base=knowledge_base,
+        llm=FakeLLM("stub answer"),
+        query_cache=QueryCache(fake_redis),
+    )
 
 
 @pytest.fixture
@@ -150,12 +158,107 @@ def test_query_failure_is_500(client, monkeypatch):
     assert response.get_json() == {"error": "failed to answer question"}
 
 
+# --- /query caching ---
+
+def _app_with(config, embeddings, llm, cache):
+    knowledge_base = KnowledgeBase(config, embeddings=embeddings)
+    app = create_app(
+        config=config, knowledge_base=knowledge_base, llm=llm, query_cache=cache
+    )
+    return app.test_client()
+
+
+def _upload(client):
+    return client.post(
+        "/upload",
+        data={"file": (io.BytesIO(_pdf_bytes()), "book.pdf")},
+        content_type="multipart/form-data",
+    )
+
+
+def test_repeated_query_is_served_from_cache(config, embeddings, fake_redis):
+    from conftest import FakeLLM
+    from rag.cache import QueryCache
+
+    llm = FakeLLM("cached answer")
+    client = _app_with(config, embeddings, llm, QueryCache(fake_redis))
+    assert _upload(client).status_code == 201
+
+    first = client.post("/query", json={"question": "what is deep learning?"})
+    second = client.post("/query", json={"question": "what is deep learning?"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.get_json() == second.get_json()
+    # The second answer came from Redis, so the LLM ran exactly once.
+    assert llm.call_count == 1
+
+
+def test_query_runs_uncached_when_cache_is_disabled(config, embeddings):
+    from conftest import FakeLLM
+    from rag.cache import QueryCache
+
+    llm = FakeLLM()
+    client = _app_with(config, embeddings, llm, QueryCache(None))
+    _upload(client)
+
+    first = client.post("/query", json={"question": "what is deep learning?"})
+    second = client.post("/query", json={"question": "what is deep learning?"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    # With no cache, every request reaches the LLM.
+    assert llm.call_count == 2
+
+
+def test_query_survives_a_redis_outage(config, embeddings):
+    from conftest import FakeLLM, RaisingRedis
+    from rag.cache import QueryCache
+
+    llm = FakeLLM()
+    client = _app_with(config, embeddings, llm, QueryCache(RaisingRedis()))
+    _upload(client)
+
+    # Both the cache read and the cache write raise; the request must still
+    # succeed rather than 500.
+    response = client.post("/query", json={"question": "what is deep learning?"})
+
+    assert response.status_code == 200
+    assert response.get_json()["answer"] == llm.reply
+
+
+def test_reupload_invalidates_cached_answers(config, embeddings, fake_redis):
+    from conftest import FakeLLM
+    from rag.cache import QueryCache
+
+    llm = FakeLLM()
+    client = _app_with(config, embeddings, llm, QueryCache(fake_redis))
+
+    _upload(client)
+    client.post("/query", json={"question": "what is deep learning?"})  # miss
+    client.post("/query", json={"question": "what is deep learning?"})  # hit
+    assert llm.call_count == 1
+
+    # A rebuilt store has a new fingerprint, so the old answer is not reused.
+    _upload(client)
+    client.post("/query", json={"question": "what is deep learning?"})  # miss again
+
+    assert llm.call_count == 2
+
+
 def test_upload_too_large_is_413(config, embeddings, monkeypatch):
     from conftest import FakeLLM
 
+    from rag.cache import QueryCache
+
     monkeypatch.setattr("rag.api.MAX_UPLOAD_BYTES", 16)
     knowledge_base = KnowledgeBase(config, embeddings=embeddings)
-    app = create_app(config=config, knowledge_base=knowledge_base, llm=FakeLLM())
+    app = create_app(
+        config=config,
+        knowledge_base=knowledge_base,
+        llm=FakeLLM(),
+        query_cache=QueryCache(None),
+    )
     client = app.test_client()
 
     data = {"file": (io.BytesIO(_pdf_bytes()), "book.pdf")}
@@ -190,10 +293,14 @@ def test_default_llm_is_constructed_when_none_injected(config, embeddings, monke
         def __init__(self, model):
             constructed["model"] = model
 
+    from rag.cache import QueryCache
+
     monkeypatch.setattr("langchain_google_genai.ChatGoogleGenerativeAI", DummyLLM)
     knowledge_base = KnowledgeBase(config, embeddings=embeddings)
 
-    app = create_app(config=config, knowledge_base=knowledge_base)
+    app = create_app(
+        config=config, knowledge_base=knowledge_base, query_cache=QueryCache(None)
+    )
 
     assert isinstance(app.llm, DummyLLM)
     assert constructed["model"] == config.llm_model

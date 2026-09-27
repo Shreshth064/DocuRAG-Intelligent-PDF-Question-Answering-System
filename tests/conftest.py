@@ -70,6 +70,25 @@ class FakeLLM:
         return self.last_prompt.to_string()
 
 
+class RaisingRedis:
+    """A Redis stand-in whose every command raises, to drive the cache's
+    graceful-degradation branches without a real (mis)configured server."""
+
+    def get(self, *args, **kwargs):
+        raise ConnectionError("redis is down")
+
+    def set(self, *args, **kwargs):
+        raise ConnectionError("redis is down")
+
+
+@pytest.fixture
+def fake_redis():
+    """A fresh in-memory Redis for each test, so the suite stays offline."""
+    import fakeredis
+
+    return fakeredis.FakeStrictRedis()
+
+
 @pytest.fixture
 def embeddings():
     return HashEmbeddings()
