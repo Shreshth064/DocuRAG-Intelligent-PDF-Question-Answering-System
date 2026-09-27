@@ -1,3 +1,5 @@
+import hashlib
+
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -21,6 +23,19 @@ class KnowledgeBase:
     def is_populated(self) -> bool:
         """True only if the store holds documents; an empty directory is not enough."""
         return bool(self.store.get(limit=1)["ids"])
+
+    @property
+    def fingerprint(self) -> str:
+        """A stable identifier for the current corpus.
+
+        Derived from the stored document ids, so it changes whenever the set
+        of documents changes and a rebuilt store can never serve a previous
+        store's cached answers. Hashing the ids (rather than an in-process
+        counter) keeps the identity stable across a restart, so a warm cache
+        survives one.
+        """
+        ids = self.store.get(include=[])["ids"]
+        return hashlib.sha256(",".join(sorted(ids)).encode()).hexdigest()
 
     @property
     def store(self) -> Chroma:

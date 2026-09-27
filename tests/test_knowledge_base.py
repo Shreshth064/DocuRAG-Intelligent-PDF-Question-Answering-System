@@ -38,6 +38,32 @@ def test_a_fresh_instance_sees_persisted_vectors(config, embeddings, sample_docu
     assert reopened.is_populated
 
 
+def test_fingerprint_is_stable_for_an_unchanged_store(config, embeddings, sample_documents):
+    knowledge_base = KnowledgeBase(config, embeddings=embeddings)
+    knowledge_base.build(sample_documents)
+
+    assert knowledge_base.fingerprint == knowledge_base.fingerprint
+
+
+def test_fingerprint_survives_reopening_the_store(config, embeddings, sample_documents):
+    KnowledgeBase(config, embeddings=embeddings).build(sample_documents)
+
+    first = KnowledgeBase(config, embeddings=embeddings).fingerprint
+    second = KnowledgeBase(config, embeddings=embeddings).fingerprint
+
+    assert first == second
+
+
+def test_fingerprint_changes_when_the_corpus_changes(config, embeddings, sample_documents):
+    knowledge_base = KnowledgeBase(config, embeddings=embeddings)
+    knowledge_base.build(sample_documents)
+    before = knowledge_base.fingerprint
+
+    knowledge_base.build(sample_documents[:1])
+
+    assert knowledge_base.fingerprint != before
+
+
 def test_retriever_returns_at_most_k_documents(tmp_path, embeddings, sample_documents):
     config = RAGConfig(
         persist_directory=str(tmp_path / "store"),
