@@ -189,9 +189,19 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
 
 
 def main() -> None:  # pragma: no cover - dev-server entrypoint
+    import logging
+
     from dotenv import load_dotenv
 
     from .environment import require
+
+    # Flask's app.logger defaults to WARNING, which hides the cache hit/miss
+    # INFO lines. Configure logging here (only for the real server, never the
+    # test process) so cache behaviour is observable in the container logs.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
     load_dotenv()
     require("GOOGLE_API_KEY", "HUGGINGFACEHUB_API_TOKEN")

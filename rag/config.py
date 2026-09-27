@@ -6,7 +6,7 @@ class RAGConfig:
     """Single source of truth for every tunable in the pipeline."""
 
     embedding_model: str = "BAAI/bge-m3"
-    llm_model: str = "gemini-3.6-flash"
+    llm_model: str = "gemini-2.5-flash"
     persist_directory: str = "ChromaDB"
     chunk_size: int = 1000
     chunk_overlap: int = 200
