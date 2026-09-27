@@ -517,6 +517,9 @@ embeddings and a fake LLM, so the entire API is exercised offline in
 Both frontends ship from a single image. Because embeddings now go
 through the Hugging Face Inference API, no model is baked in or
 downloaded at runtime --- the only state is the Chroma persist directory.
+Compose also starts a **Redis** service that caches answered queries; the
+`api` and `ui` services depend on it, but it is optional at runtime (see
+[Query cache](#query-cache-redis) below).
 
 ### Prerequisites
 
@@ -553,20 +556,41 @@ docker run --rm docurag-api:latest printenv | grep -iE 'api_key|token'
 
 ``` bash
 docker compose build
-docker compose up          # API on :8000, Streamlit on :8501
+docker compose up          # API on :8000, Streamlit on :8501, Redis on :6379
 
 curl http://localhost:8000/health
 # {"status":"ok"}
 ```
 
-Each service builds to its own image tag (`docurag-api`, `docurag-ui`,
-`docurag-test`) so a parallel build never races on a shared tag.
+`api` and `ui` declare `depends_on: redis` with `condition: service_healthy`,
+so compose waits for Redis to pass its `redis-cli ping` health check before
+starting them.
+
+Each app service builds to its own image tag (`docurag-api`, `docurag-ui`,
+`docurag-test`) so a parallel build never races on a shared tag; `redis`
+runs the stock `redis:7-alpine` image.
 
 | Service | Port | Image | Command |
 | --- | --- | --- | --- |
+| `redis` | 6379 | `redis:7-alpine` | `redis-server --appendonly yes` |
 | `api` | 8000 | `docurag-api` | `python -m rag.api` (the image default) |
 | `ui` | 8501 | `docurag-ui` | `streamlit run app.py` |
 | `test` | --- | `docurag-test` | `pytest --cov` (profile `test`) |
+
+### Query cache (Redis)
+
+The `/query` endpoint caches each answer in Redis, keyed on a hash of the
+question **and** a fingerprint of the active vector store. A repeated
+question against an unchanged corpus is served straight from the cache,
+skipping retrieval and the LLM call entirely; re-uploading a document
+changes the fingerprint, so stale answers are never returned.
+
+The connection is configured with `REDIS_URL` --- `redis://redis:6379` in
+compose, defaulting to `redis://localhost:6379` elsewhere. The cache is
+**best-effort**: if Redis is unreachable the API logs a warning and answers
+uncached. A cache outage never fails a request or crashes startup, so you
+can also run the API with no Redis at all. The cache survives a restart
+because Redis persists to the `redis-data` volume (`--appendonly yes`).
 
 ### Run the tests in the image
 

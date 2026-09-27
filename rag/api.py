@@ -14,6 +14,7 @@ from flask import Flask, current_app, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
+from .cache import QueryCache
 from .config import RAGConfig
 from .ingestion import DocumentIngestor
 from .knowledge_base import KnowledgeBase
@@ -78,12 +79,13 @@ def _rebuild_pipeline(app: Flask) -> None:
     )
 
 
-def create_app(config=None, knowledge_base=None, llm=None) -> Flask:
+def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> Flask:
     """Application factory.
 
     In production, pass nothing and the real embedding client, store and
     LLM are built once. Tests inject a KnowledgeBase backed by fake
-    embeddings and a fake LLM, so the whole API runs offline.
+    embeddings, a fake LLM, and a cache over a fake Redis, so the whole API
+    runs offline.
     """
     app = Flask(__name__)
     config = config or RAGConfig()
@@ -91,6 +93,9 @@ def create_app(config=None, knowledge_base=None, llm=None) -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
     app.rag_config = config
     app.knowledge_base = knowledge_base or KnowledgeBase(config)
+    # from_env never raises: an unreachable Redis yields a disabled cache, so
+    # a cache outage cannot crash startup.
+    app.query_cache = query_cache if query_cache is not None else QueryCache.from_env()
     if llm is not None:
         app.llm = llm
     else:
@@ -140,19 +145,28 @@ def create_app(config=None, knowledge_base=None, llm=None) -> Flask:
         if not current_app.knowledge_base.is_populated:
             raise StoreNotReady()
 
+        cache = current_app.query_cache
+        store_id = current_app.knowledge_base.fingerprint
+
+        cached = cache.get(question, store_id)
+        if cached is not None:
+            current_app.logger.info("cache hit; skipping retrieval and LLM")
+            return jsonify(cached), 200
+
         try:
             answer = current_app.rag_pipeline.ask(question)
         except Exception as exc:
             current_app.logger.exception("query failed")
             raise ApiError("failed to answer question") from exc
 
-        return jsonify(
-            {
-                "answer": answer.text,
-                "pages": answer.pages,
-                "num_sources": len(answer.sources),
-            }
-        ), 200
+        body = {
+            "answer": answer.text,
+            "pages": answer.pages,
+            "num_sources": len(answer.sources),
+        }
+        cache.set(question, store_id, body)
+        current_app.logger.info("cache miss; computed and stored answer")
+        return jsonify(body), 200
 
     @app.errorhandler(ApiError)
     def handle_api_error(exc: ApiError):

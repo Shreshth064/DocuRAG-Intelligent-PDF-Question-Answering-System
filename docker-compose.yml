@@ -1,4 +1,22 @@
 services:
+  # Cache for answered queries. A repeated question skips retrieval and the
+  # LLM. The API degrades gracefully if this is down, so it is not a hard
+  # dependency for correctness -- only for the speed-up.
+  redis:
+    image: redis:7-alpine
+    # appendonly persists the cache across restarts; a cold cache would just
+    # be re-warmed, so this is a convenience rather than a requirement.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -13,6 +31,13 @@ services:
     # (.env is in .dockerignore and no ARG/ENV carries them at build time).
     env_file:
       - .env
+    environment:
+      # Points the cache at the redis service; the code defaults to
+      # redis://localhost:6379 when this is unset (e.g. outside compose).
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       # RAGConfig.persist_directory defaults to "ChromaDB", so this is
       # the store the API reads and writes.
@@ -35,6 +60,11 @@ services:
       - "8501:8501"
     env_file:
       - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       # app.py hardcodes RAGConfig(persist_directory="chroma_db"), a
       # different store from the API's. They are kept as separate volumes
@@ -64,3 +94,4 @@ services:
 volumes:
   api-store:
   ui-store:
+  redis-data:
