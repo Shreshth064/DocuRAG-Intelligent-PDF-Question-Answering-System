@@ -34,8 +34,12 @@ RUN uv venv "$VIRTUAL_ENV"
 # application code does not invalidate this layer.
 WORKDIR /app
 COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -r requirements.txt
+# No --mount=type=cache here on purpose: cache mounts require BuildKit,
+# and the classic builder (what `apt install docker.io` gives you without
+# the docker-buildx plugin) fails outright on them. --no-cache keeps the
+# layer from carrying uv's download cache.
+RUN uv pip install --no-cache --python "$VIRTUAL_ENV/bin/python" \
+    -r requirements.txt
 
 
 # ---------------------------------------------------------------------
@@ -88,8 +92,8 @@ USER root
 COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /usr/local/bin/uv
 
 COPY requirements.txt requirements-dev.txt ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python "$VIRTUAL_ENV/bin/python" -r requirements-dev.txt
+RUN uv pip install --no-cache --python "$VIRTUAL_ENV/bin/python" \
+    -r requirements-dev.txt
 
 COPY --chown=appuser:appuser pyproject.toml ./
 COPY --chown=appuser:appuser tests/ ./tests/

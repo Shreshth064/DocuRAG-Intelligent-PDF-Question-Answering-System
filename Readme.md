@@ -520,6 +520,19 @@ downloaded at runtime --- the only state is the Chroma persist directory.
 
 ### Prerequisites
 
+Install Docker. `docker-buildx` is not strictly required --- the
+Dockerfile avoids BuildKit-only features so it builds with the classic
+builder too --- but it makes rebuilds noticeably faster:
+
+``` bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-v2 docker-buildx
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"   # takes effect after you log out and back in
+```
+
+Until you re-login, prefix commands with `sudo`.
+
 Create `.env` in the project root first; compose injects it at runtime:
 
 ``` env
@@ -604,6 +617,14 @@ docker compose down -v
     ownership rather than defaulting to root.
 -   **Healthcheck:** `curl -fsS /health`. `curl` is the only apt package
     in the runtime stage, since the healthcheck needs it at run time.
+-   **Expected size:** roughly **0.9 GB**. That is the dependency tree,
+    not a packaging leak --- Streamlit pulls `pyarrow` (152 MB),
+    `pandas` and `pydeck`, while Chroma pulls `onnxruntime` (62 MB),
+    `chromadb_rust_bindings` and `kubernetes`. Together that is ~760 MB
+    of site-packages before the base image. There is no `torch`. If the
+    API image needs to be smaller, the lever is splitting Streamlit into
+    its own stage so the API image drops ~215 MB --- not `.dockerignore`,
+    which is already excluding the venv, `.git`, vector stores and PDFs.
 
 ------------------------------------------------------------------------
 
