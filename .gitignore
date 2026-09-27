@@ -16,3 +16,6 @@ htmlcov/
 .idea/
 
 tempCodeRunnerFile.py
+
+# Generated report PDFs at the repo root (source PDFs in document loader/ stay tracked)
+/*.pdf
