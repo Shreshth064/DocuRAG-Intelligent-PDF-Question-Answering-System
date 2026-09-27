@@ -541,10 +541,11 @@ HUGGINGFACEHUB_API_TOKEN=your_hugging_face_token
 ```
 
 `.env` is listed in `.dockerignore`, and no `ARG`/`ENV` carries a key, so
-**nothing secret is ever baked into the image**. Verify for yourself:
+**nothing secret is ever baked into the image**. The keys arrive only at
+runtime, via `env_file`. Verify against a fresh container (no `env_file`):
 
 ``` bash
-docker run --rm docurag:latest printenv | grep -iE 'GOOGLE|HUGGING'
+docker run --rm docurag-api:latest printenv | grep -iE 'api_key|token'
 # (no output)
 ```
 
@@ -558,11 +559,14 @@ curl http://localhost:8000/health
 # {"status":"ok"}
 ```
 
-| Service | Port | Command |
-| --- | --- | --- |
-| `api` | 8000 | `python -m rag.api` (the image default) |
-| `ui` | 8501 | `streamlit run app.py` |
-| `test` | --- | `pytest --cov` (profile `test`) |
+Each service builds to its own image tag (`docurag-api`, `docurag-ui`,
+`docurag-test`) so a parallel build never races on a shared tag.
+
+| Service | Port | Image | Command |
+| --- | --- | --- | --- |
+| `api` | 8000 | `docurag-api` | `python -m rag.api` (the image default) |
+| `ui` | 8501 | `docurag-ui` | `streamlit run app.py` |
+| `test` | --- | `docurag-test` | `pytest --cov` (profile `test`) |
 
 ### Run the tests in the image
 

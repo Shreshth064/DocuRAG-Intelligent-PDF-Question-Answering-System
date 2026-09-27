@@ -3,7 +3,10 @@ services:
     build:
       context: .
       target: runtime
-    image: docurag:latest
+    # Distinct image name per service. api and ui build the same runtime
+    # stage but must not share a tag, or a parallel `docker compose build`
+    # races two writes to one tag ("image already exists").
+    image: docurag-api:latest
     ports:
       - "8000:8000"
     # Keys are injected at runtime. They are never copied into the image
@@ -20,7 +23,7 @@ services:
     build:
       context: .
       target: runtime
-    image: docurag:latest
+    image: docurag-ui:latest
     command:
       - streamlit
       - run
@@ -53,7 +56,7 @@ services:
     build:
       context: .
       target: test
-    image: docurag:test
+    image: docurag-test:latest
     profiles: ["test"]
     # No env_file: the suite must stay runnable with no credentials.
     command: ["pytest", "--cov"]
