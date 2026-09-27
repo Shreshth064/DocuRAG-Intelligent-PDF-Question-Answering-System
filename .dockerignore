@@ -1,0 +1,48 @@
+# Keep the build context small and free of secrets. Everything here is
+# either rebuilt in the image, irrelevant to it, or must never enter it.
+
+# Secrets -- keys are supplied at runtime via env_file, never baked in.
+.env
+.env.*
+
+# Virtualenvs (hundreds of MB, and platform-specific)
+venv/
+.venv/
+
+# Version control and CI
+.git/
+.github/
+.gitignore
+
+# Generated vector stores -- these live in named volumes at runtime
+ChromaDB/
+chroma_db/
+
+# Python caches and test artefacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Generated report PDFs and source documents. The source PDFs are only
+# needed by create_database.py, which is not part of the served image.
+*.pdf
+document loader/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+tempCodeRunnerFile.py
+
+# Docs and packaging metadata not needed inside the image
+Readme.md
+uv.lock
+
+# NOTE: tests/ is deliberately NOT ignored. .dockerignore applies to the
+# whole build context, so excluding it would make the `test` stage
+# impossible. Only that stage copies tests/; the runtime stage does not,
+# so the served image still contains no tests.

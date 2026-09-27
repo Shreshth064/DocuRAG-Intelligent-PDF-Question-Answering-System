@@ -512,6 +512,101 @@ embeddings and a fake LLM, so the entire API is exercised offline in
 
 ------------------------------------------------------------------------
 
+# 🐳 Running with Docker
+
+Both frontends ship from a single image. Because embeddings now go
+through the Hugging Face Inference API, no model is baked in or
+downloaded at runtime --- the only state is the Chroma persist directory.
+
+### Prerequisites
+
+Create `.env` in the project root first; compose injects it at runtime:
+
+``` env
+GOOGLE_API_KEY=your_google_api_key
+HUGGINGFACEHUB_API_TOKEN=your_hugging_face_token
+```
+
+`.env` is listed in `.dockerignore`, and no `ARG`/`ENV` carries a key, so
+**nothing secret is ever baked into the image**. Verify for yourself:
+
+``` bash
+docker run --rm docurag:latest printenv | grep -iE 'GOOGLE|HUGGING'
+# (no output)
+```
+
+### Build and run
+
+``` bash
+docker compose build
+docker compose up          # API on :8000, Streamlit on :8501
+
+curl http://localhost:8000/health
+# {"status":"ok"}
+```
+
+| Service | Port | Command |
+| --- | --- | --- |
+| `api` | 8000 | `python -m rag.api` (the image default) |
+| `ui` | 8501 | `streamlit run app.py` |
+| `test` | --- | `pytest --cov` (profile `test`) |
+
+### Run the tests in the image
+
+The `test` stage layers the dev dependencies and the suite on top of the
+runtime image, so CI runs exactly what ships:
+
+``` bash
+docker compose run --rm test
+```
+
+It is behind a compose profile, so a plain `docker compose up` will not
+start it. No `env_file` is attached on purpose --- the suite must stay
+runnable with no credentials.
+
+### The persist volumes
+
+Chroma data lives in **named volumes**, so it survives
+`docker compose down` and container restarts. There are two, because the
+two frontends use different persist directories:
+
+| Volume | Mounted at | Used by |
+| --- | --- | --- |
+| `api-store` | `/app/ChromaDB` | `api` (the `RAGConfig` default) |
+| `ui-store` | `/app/chroma_db` | `ui` (`app.py` overrides the path) |
+
+Keeping them separate preserves current behaviour --- Streamlit uploads
+stay out of the corpus built by `create_database.py` --- and avoids two
+processes writing one SQLite file. To make both services share one store,
+point them at the same named volume; expect possible `database is locked`
+errors under concurrent writes.
+
+Wipe the stored vectors with:
+
+``` bash
+docker compose down -v
+```
+
+### Image design notes
+
+-   **Base:** `python:3.12-slim-bookworm`, pinned. 3.12 sits in the
+    middle of the 3.11--3.14 CI matrix and has the most dependable
+    prebuilt wheels for `chromadb`'s tree (`onnxruntime`,
+    `pydantic-core`); on 3.13/3.14 a missing wheel forces a source build.
+-   **Multi-stage:** a builder installs dependencies into `/opt/venv`
+    with `uv` (pinned to 0.12.19); the runtime stage copies only that
+    venv, leaving `uv`, `build-essential` and every download cache
+    behind.
+-   **Layer caching:** `requirements.txt` is copied and installed
+    *before* the source, so editing code does not rebuild dependencies.
+-   **Non-root:** runs as `appuser` (uid 1000). The persist directories
+    are created and chowned in the image so named volumes inherit that
+    ownership rather than defaulting to root.
+-   **Healthcheck:** `curl -fsS /health`. `curl` is the only apt package
+    in the runtime stage, since the healthcheck needs it at run time.
+
+------------------------------------------------------------------------
+
 # 🧪 Tests
 
 The pipeline takes its retriever and LLM as constructor arguments, so the
