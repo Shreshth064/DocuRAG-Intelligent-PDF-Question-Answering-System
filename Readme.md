@@ -111,6 +111,8 @@ DocuRAG-Intelligent-PDF-Question-Answering-System/
 │   ├── ingestion.py         ← DocumentIngestor
 │   ├── knowledge_base.py    ← KnowledgeBase
 │   ├── pipeline.py          ← RAGPipeline, Answer
+│   ├── tools.py             ← DocumentToolkit: document-scoped agent tools
+│   ├── agent.py             ← DocumentAgent: tool-calling agent (opt-in)
 │   └── api.py               ← Flask REST API (thin adapter over the engine)
 │
 ├── create_database.py       ← entry point: build the vector store
@@ -123,6 +125,8 @@ DocuRAG-Intelligent-PDF-Question-Answering-System/
 │   ├── test_ingestion.py
 │   ├── test_knowledge_base.py
 │   ├── test_pipeline.py
+│   ├── test_tools.py
+│   ├── test_agent.py
 │   └── test_api.py
 │
 ├── pyproject.toml           ← pytest + coverage configuration
@@ -193,6 +197,77 @@ share one engine, so the CLI and the web app can never drift apart.
 -   **One source of truth** --- every magic number lives in `RAGConfig`.
     The frontends override only what they need
     (`RAGConfig(persist_directory="chroma_db")` in the Streamlit app).
+
+------------------------------------------------------------------------
+
+# 🤖 Agentic Tools
+
+Besides the fixed retrieve-then-answer `RAGPipeline`, DocuRAG has an
+**opt-in agentic path**. A LangChain tool-calling agent
+(`create_tool_calling_agent` + `AgentExecutor`, over the same Gemini model
+named in `RAGConfig.llm_model`) decides for itself which tools to call and
+in what order. For example, it might search the document, pull the
+citations, and then run the calculator on the figures it found, all before
+it answers.
+
+  Tool                        What it does
+  --------------------------- ------------------------------------------------------------
+  `search_documents(query)`   Retrieves the most relevant chunks from the vector store and returns their text
+  `get_citations(query)`      Returns the provenance of those chunks: page numbers, source file and chunk ids
+  `summarize_document(topic)` Retrieves more broadly (`RAGConfig.summary_k` chunks) and has the LLM summarise **only those chunks**. With no matching chunks it abstains without calling the LLM
+  `calculator(expression)`    Evaluates arithmetic on figures from the document with a **safe AST evaluator**: numbers, `+ - * / **`, parentheses and unary minus only. There is no `eval()`. Names, calls, attribute access and oversized powers are rejected, and the error is handed back to the agent
+
+Use it from the CLI with `python main.py --agent`, or over HTTP with
+`POST /agent` (see the REST API endpoints below). `/query` and the
+Streamlit app are unchanged.
+
+``` python
+from rag import DocumentAgent
+
+answer = DocumentAgent.from_config().ask("By how much did revenue grow?")
+answer.text        # the grounded answer
+answer.tools_used  # e.g. ["search_documents", "get_citations", "calculator"]
+```
+
+### Design decision: tools are document-scoped
+
+RAG exists so that an answer can be traced back to the document. An agent
+with open-ended tools would break that guarantee without anyone noticing.
+Once a model can mix retrieved chunks with web results, a reader can no
+longer tell which sentence came from the PDF and which came from the
+internet. Every tool here is therefore **scoped to the loaded
+document(s)**:
+
+-   The retrieval tools only read the Chroma store. `summarize_document`
+    shows its LLM nothing but the retrieved chunks. `calculator` only
+    does arithmetic and has no access to data.
+-   The agent's system prompt tells it to answer **only** from tool
+    output, never from background knowledge. If the tools don't surface
+    the answer, it must reply with the same abstention message the
+    pipeline uses (*"I could not find the answer in the document."*).
+-   **Web search was deliberately excluded.** If it is ever added, it
+    should be a clearly labelled, abstain-first fallback: the agent would
+    first say that the document doesn't contain the answer, and any
+    outside result would be marked as not coming from the document. It
+    would never be blended into a grounded answer.
+
+### Design notes
+
+-   `DocumentToolkit(retriever, llm, summary_retriever=None)` takes its
+    collaborators by injection, like `RAGPipeline`.
+    `from_knowledge_base()` wires the real ones, and `as_tools()` exposes
+    them as LangChain `StructuredTool`s.
+-   `build_agent(llm, tools)` returns the `AgentExecutor`. The loop is
+    capped at `max_iterations` so a confused agent can't spin forever.
+    `DocumentAgent.from_config()` / `from_knowledge_base()` are factories
+    consistent with the rest of the package.
+-   `DocumentAgent.ask()` returns an immutable `AgentAnswer` that carries
+    the text plus every `ToolCall` (tool, input, output), so the
+    reasoning trace can be audited.
+-   `AgentExecutor` and `create_tool_calling_agent` moved to the
+    `langchain-classic` package in LangChain 1.x. It is the only new
+    dependency, and it was already being installed through
+    `langchain-community`.
 
 ------------------------------------------------------------------------
 
@@ -439,6 +514,13 @@ To exit:
 0
 ```
 
+To let the LLM choose and chain the document-scoped tools instead (see
+[Agentic Tools](#-agentic-tools)):
+
+``` bash
+python main.py --agent
+```
+
 ## Step 3 --- (Optional) Run the Web App
 
 ``` bash
@@ -472,6 +554,7 @@ is re-pointed at the new store.
   `GET /health`    none                           `200` `{"status":"ok"}`  ---
   `POST /upload`   `multipart/form-data`, `file`  `201` `{"chunks": N}`    `400` no file · `415` not a PDF · `413` too large · `500` ingest failed
   `POST /query`    JSON `{"question": "..."}`      `200` answer + `pages`  `400` empty question · `404` no store yet · `500` query failed
+  `POST /agent`    JSON `{"question": "..."}`      `200` answer + `tools_used` + `steps`  `400` empty question · `404` no store yet · `500` agent failed
 
 `/health` touches no dependencies, so it is safe for container
 healthchecks. Every response --- including errors --- is JSON; a single
@@ -490,7 +573,17 @@ curl -X POST http://localhost:8000/query \
      -H "Content-Type: application/json" \
      -d '{"question": "What is deep learning?"}'
 # -> {"answer": "...", "pages": [3, 7], "num_sources": 4}
+
+# 3. or let the agent choose and chain document-scoped tools
+curl -X POST http://localhost:8000/agent \
+     -H "Content-Type: application/json" \
+     -d '{"question": "By how much did revenue grow?"}'
+# -> {"answer": "...", "tools_used": ["search_documents", "calculator"],
+#     "steps": [{"tool": "search_documents", "input": {"query": "revenue"}}, ...]}
 ```
+
+`/agent` is built per request, which is cheap because it only binds the
+tools, so it always wraps the current store. It is not cached.
 
 ### Safety notes
 
@@ -660,7 +753,7 @@ docker compose down -v
 
 The pipeline takes its retriever and LLM as constructor arguments, so the
 whole suite runs against fakes --- **no API keys, no network calls, no
-cost**. 48 tests, 100% branch coverage of the `rag/` package, under a
+cost**. 146 tests, 100% branch coverage of the `rag/` package, under a
 second to run.
 
 ### Install and run
@@ -685,18 +778,21 @@ tests/
 ├── test_ingestion.py        ← DocumentIngestor: chunking, overlap, real PDF
 ├── test_knowledge_base.py   ← KnowledgeBase: build, persist, reopen, retrieve
 ├── test_pipeline.py         ← RAGPipeline + Answer: prompt, sources, pages
+├── test_tools.py            ← DocumentToolkit: safe calculator, grounded tools
+├── test_agent.py            ← DocumentAgent: scripted tool calls end to end
 └── test_api.py              ← Flask endpoints: status codes, upload, query
 ```
 
 ### Test doubles
 
-`conftest.py` provides three fakes, all deterministic and offline:
+`conftest.py` provides these fakes, all deterministic and offline:
 
   Double            Replaces                    Why
   ----------------- --------------------------- ---------------------------------
   `HashEmbeddings`  Hugging Face Inference API  Real embeddings need a token and aren't reproducible
   `FakeLLM`         Gemini                      Records the prompt it receives so tests can assert on the context
   `FakeRetriever`   Chroma retriever            Returns a fixed document set and records the question it was asked
+  `ScriptedChatModel` Gemini (tool calling)     Replays scripted tool calls and answers so a real `AgentExecutor` runs offline
 
 ### Markers
 
@@ -718,7 +814,7 @@ explaining each one.
 ### Continuous integration
 
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs the
-suite on every push and pull request across Python 3.11, 3.12 and 3.13.
+suite on every push and pull request across Python 3.11, 3.12, 3.13 and 3.14.
 No secrets are configured in CI on purpose --- if a test ever needs an
 API key, the build breaks, which keeps the suite honest.
 
@@ -816,7 +912,6 @@ Possible improvements include:
 
 -   Support for multiple PDFs
 -   Automatic document indexing
--   Page-number citations in answers
 -   Chat history
 -   Streaming responses
 -   OCR for scanned PDFs
