@@ -4,6 +4,8 @@ python-dotenv
 langchain
 langchain-community
 langchain-core
+# AgentExecutor + create_tool_calling_agent moved here in LangChain 1.x.
+langchain-classic>=1.0.8,<2
 langchain-chroma
 langchain-huggingface
 langchain-google-genai
