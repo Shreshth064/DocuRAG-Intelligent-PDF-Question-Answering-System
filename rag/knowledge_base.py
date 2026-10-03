@@ -54,8 +54,17 @@ class KnowledgeBase:
         )
         return self
 
-    def as_retriever(self):
+    def as_retriever(self, k: int | None = None):
+        """An MMR retriever over the store.
+
+        k overrides the configured number of chunks returned, for callers
+        that need a broader sweep (e.g. summarisation). The candidate pool
+        is widened to match so MMR always has at least k to choose from.
+        """
+        search_kwargs = self._config.search_kwargs
+        if k is not None:
+            search_kwargs |= {"k": k, "fetch_k": max(k, search_kwargs["fetch_k"])}
         return self.store.as_retriever(
             search_type="mmr",
-            search_kwargs=self._config.search_kwargs,
+            search_kwargs=search_kwargs,
         )
