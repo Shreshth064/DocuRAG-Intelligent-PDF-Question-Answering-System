@@ -306,6 +306,91 @@ def test_default_llm_is_constructed_when_none_injected(config, embeddings, monke
     assert constructed["model"] == config.llm_model
 
 
+# --- /agent ---
+
+@pytest.fixture
+def make_agent_client(config, embeddings):
+    """An offline app whose LLM replays a scripted tool-calling conversation."""
+    from conftest import ScriptedChatModel
+
+    from rag.cache import QueryCache
+
+    def _make(script):
+        llm = ScriptedChatModel(script=list(script))
+        app = create_app(
+            config=config,
+            knowledge_base=KnowledgeBase(config, embeddings=embeddings),
+            llm=llm,
+            query_cache=QueryCache(None),
+        )
+        return app.test_client(), llm
+
+    return _make
+
+
+def test_agent_before_any_upload_is_404(make_agent_client):
+    client, _ = make_agent_client([])
+
+    response = client.post("/agent", json={"question": "anything"})
+
+    assert response.status_code == 404
+
+
+def test_agent_missing_question_is_400(make_agent_client):
+    client, _ = make_agent_client([])
+
+    response = client.post("/agent", json={})
+
+    assert response.status_code == 400
+
+
+def test_agent_after_upload_chooses_a_tool_and_answers(make_agent_client):
+    from conftest import tool_call
+    from langchain_core.messages import AIMessage
+
+    client, llm = make_agent_client(
+        [
+            tool_call("search_documents", query="gradient descent"),
+            AIMessage(content="Deep learning uses gradient descent."),
+        ]
+    )
+    client.post(
+        "/upload",
+        data={"file": (io.BytesIO(_pdf_bytes()), "doc.pdf")},
+        content_type="multipart/form-data",
+    )
+
+    response = client.post("/agent", json={"question": "What does it use?"})
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "answer": "Deep learning uses gradient descent.",
+        "tools_used": ["search_documents"],
+        "steps": [{"tool": "search_documents", "input": {"query": "gradient descent"}}],
+    }
+    # The uploaded document's text reached the LLM as the tool result.
+    second_turn = "\n".join(str(message.content) for message in llm.prompts[1])
+    assert "gradient descent" in second_turn
+
+
+def test_agent_failure_is_500(make_agent_client, monkeypatch):
+    client, _ = make_agent_client([])
+    client.post(
+        "/upload",
+        data={"file": (io.BytesIO(_pdf_bytes()), "doc.pdf")},
+        content_type="multipart/form-data",
+    )
+
+    def boom(self, question):
+        raise RuntimeError("LLM unavailable")
+
+    monkeypatch.setattr("rag.agent.DocumentAgent.ask", boom)
+    response = client.post("/agent", json={"question": "anything"})
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "failed to answer question"}
+
+
 # --- routing ---
 
 def test_unknown_route_is_404_json(client):
