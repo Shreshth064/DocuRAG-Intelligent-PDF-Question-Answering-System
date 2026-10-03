@@ -91,3 +91,18 @@ def test_retriever_k_follows_the_config(tmp_path, embeddings, sample_documents):
     hits = KnowledgeBase(config, embeddings=embeddings).as_retriever().invoke("gradients")
 
     assert len(hits) == 1
+
+
+def test_retriever_k_can_be_overridden_per_call(tmp_path, embeddings, sample_documents):
+    # fetch_k is below the override, so it must widen to keep MMR satisfiable.
+    config = RAGConfig(
+        persist_directory=str(tmp_path / "store"),
+        retriever_k=1,
+        retriever_fetch_k=2,
+    )
+    knowledge_base = KnowledgeBase(config, embeddings=embeddings).build(sample_documents)
+
+    hits = knowledge_base.as_retriever(k=3).invoke("gradients")
+
+    assert len(hits) == 3
+    assert len(knowledge_base.as_retriever().invoke("gradients")) == 1
