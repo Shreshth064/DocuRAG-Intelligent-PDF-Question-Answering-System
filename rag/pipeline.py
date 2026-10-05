@@ -4,10 +4,9 @@ from langchain_core.documents import Document
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
-from langchain_google_genai import ChatGoogleGenerativeAI
-
 from .config import RAGConfig
 from .knowledge_base import KnowledgeBase
+from .llm import build_llm
 
 NOT_FOUND_MESSAGE = "I could not find the answer in the document."
 
@@ -82,7 +81,7 @@ class RAGPipeline:
         config = config or RAGConfig()
         return cls(
             retriever=KnowledgeBase(config).as_retriever(),
-            llm=ChatGoogleGenerativeAI(model=config.llm_model),
+            llm=build_llm(config),
         )
 
     def retrieve(self, question: str) -> list[Document]:

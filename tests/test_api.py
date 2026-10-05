@@ -285,25 +285,26 @@ def test_unexpected_error_is_masked_as_500(client, monkeypatch):
 
 
 def test_default_llm_is_constructed_when_none_injected(config, embeddings, monkeypatch):
-    # Cover the production branch that builds a real Gemini client, without
-    # a key or network, by swapping the class the factory imports.
-    constructed = {}
+    # Cover the production branch that builds the real (retrying) Gemini
+    # client, without a key or network, by swapping the factory it calls.
+    built = object()
+    received = {}
 
-    class DummyLLM:
-        def __init__(self, model):
-            constructed["model"] = model
+    def fake_build_llm(cfg):
+        received["config"] = cfg
+        return built
 
     from rag.cache import QueryCache
 
-    monkeypatch.setattr("langchain_google_genai.ChatGoogleGenerativeAI", DummyLLM)
+    monkeypatch.setattr("rag.api.build_llm", fake_build_llm)
     knowledge_base = KnowledgeBase(config, embeddings=embeddings)
 
     app = create_app(
         config=config, knowledge_base=knowledge_base, query_cache=QueryCache(None)
     )
 
-    assert isinstance(app.llm, DummyLLM)
-    assert constructed["model"] == config.llm_model
+    assert app.llm is built
+    assert received["config"] is config
 
 
 # --- routing ---
