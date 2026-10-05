@@ -13,10 +13,10 @@ from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from .config import RAGConfig
 from .knowledge_base import KnowledgeBase
+from .llm import build_chat_model, with_config_retry
 from .pipeline import NOT_FOUND_MESSAGE, _as_text
 from .tools import DocumentToolkit
 
@@ -49,15 +49,25 @@ AGENT_PROMPT = ChatPromptTemplate.from_messages(
 def build_agent(
     llm: BaseChatModel,
     tools: list[BaseTool],
+    config: RAGConfig | None = None,
     prompt: ChatPromptTemplate = AGENT_PROMPT,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
 ) -> AgentExecutor:
-    """Wire a tool-calling agent and its executor over the given tools."""
+    """Wire a tool-calling agent and its executor over the given tools.
+
+    llm must be a bare chat model so the tools can be bound to it. The
+    transient-error retry is applied to the resulting agent runnable instead,
+    so each planning step (one LLM turn) is retried on its own and a 503
+    mid-run never re-executes tool calls that already succeeded.
+    """
+    agent = with_config_retry(create_tool_calling_agent(llm, tools, prompt), config)
     return AgentExecutor(
-        agent=create_tool_calling_agent(llm, tools, prompt),
+        agent=agent,
         tools=tools,
         max_iterations=max_iterations,
         return_intermediate_steps=True,
+        # RunnableRetry only retries invoke(); a streamed step would bypass it.
+        stream_runnable=False,
     )
 
 
@@ -91,15 +101,18 @@ class DocumentAgent:
         llm: BaseChatModel,
         config: RAGConfig | None = None,
     ) -> "DocumentAgent":
-        tools = DocumentToolkit.from_knowledge_base(knowledge_base, llm, config).as_tools()
-        return cls(build_agent(llm, tools))
+        """llm is the bare chat model; retries are layered on here."""
+        tools = DocumentToolkit.from_knowledge_base(
+            knowledge_base, with_config_retry(llm, config), config
+        ).as_tools()
+        return cls(build_agent(llm, tools, config))
 
     @classmethod
     def from_config(cls, config: RAGConfig | None = None) -> "DocumentAgent":
         config = config or RAGConfig()
         return cls.from_knowledge_base(
             KnowledgeBase(config),
-            ChatGoogleGenerativeAI(model=config.llm_model),
+            build_chat_model(config),
             config,
         )
 

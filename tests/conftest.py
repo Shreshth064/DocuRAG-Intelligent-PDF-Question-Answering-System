@@ -5,6 +5,8 @@ and the LLM are both replaced with deterministic fakes, which is only
 possible because KnowledgeBase and RAGPipeline take them as arguments.
 """
 
+from typing import Any
+
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -79,11 +81,13 @@ class ScriptedChatModel(BaseChatModel):
 
     Each call pops the next AIMessage, so a test can script "call tool X
     with these args" followed by a final answer, and drive a real
-    AgentExecutor end to end without a network. Every prompt it receives is
-    recorded so tests can assert that tool results were fed back to it.
+    AgentExecutor end to end without a network. A scripted exception is
+    raised instead of returned, to simulate a failing API call. Every prompt
+    it receives is recorded so tests can assert that tool results were fed
+    back to it.
     """
 
-    script: list[AIMessage]
+    script: list[Any]  # AIMessage replies, or exceptions to raise
     prompts: list = Field(default_factory=list)
     bound_tools: list = Field(default_factory=list)
 
@@ -97,7 +101,10 @@ class ScriptedChatModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.prompts.append(messages)
-        return ChatResult(generations=[ChatGeneration(message=self.script.pop(0))])
+        reply = self.script.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return ChatResult(generations=[ChatGeneration(message=reply)])
 
 
 def tool_call(name: str, call_id: str = "call_1", **args) -> AIMessage:

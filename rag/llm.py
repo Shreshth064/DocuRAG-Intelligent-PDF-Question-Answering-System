@@ -39,16 +39,31 @@ def with_transient_retry(
     )
 
 
-def build_llm(config: RAGConfig | None = None) -> Runnable:
-    """The configured Gemini chat model, retried on transient failures."""
+def with_config_retry(runnable: Runnable, config: RAGConfig | None = None) -> Runnable:
+    """with_transient_retry, with attempts and waits taken from RAGConfig."""
     config = config or RAGConfig()
-    # The client retries internally by default (max_retries=6), which would
-    # multiply with .with_retry() into up to 18 HTTP calls. One attempt here
-    # leaves .with_retry() as the single, bounded retry layer.
-    llm = ChatGoogleGenerativeAI(model=config.llm_model, max_retries=1)
     return with_transient_retry(
-        llm,
+        runnable,
         max_attempts=config.llm_max_attempts,
         initial_wait=config.llm_retry_initial_wait,
         max_wait=config.llm_retry_max_wait,
     )
+
+
+def build_chat_model(config: RAGConfig | None = None) -> ChatGoogleGenerativeAI:
+    """The bare configured Gemini chat model, without the retry wrapper.
+
+    For callers that need the chat-model interface itself, e.g. bind_tools()
+    for the agent, which a retry-wrapped runnable no longer exposes. Such
+    callers apply with_config_retry() to whatever they build on top of it.
+    """
+    config = config or RAGConfig()
+    # The client retries internally by default (max_retries=6), which would
+    # multiply with .with_retry() into up to 18 HTTP calls. One attempt here
+    # leaves .with_retry() as the single, bounded retry layer.
+    return ChatGoogleGenerativeAI(model=config.llm_model, max_retries=1)
+
+
+def build_llm(config: RAGConfig | None = None) -> Runnable:
+    """The configured Gemini chat model, retried on transient failures."""
+    return with_config_retry(build_chat_model(config), config)

@@ -19,7 +19,7 @@ from .cache import QueryCache
 from .config import RAGConfig
 from .ingestion import DocumentIngestor
 from .knowledge_base import KnowledgeBase
-from .llm import build_llm
+from .llm import build_chat_model, with_config_retry
 from .pipeline import RAGPipeline
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -98,7 +98,14 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
     # from_env never raises: an unreachable Redis yields a disabled cache, so
     # a cache outage cannot crash startup.
     app.query_cache = query_cache if query_cache is not None else QueryCache.from_env()
-    app.llm = llm if llm is not None else build_llm(config)
+    # One client, two views: /agent needs the bare chat model to bind tools
+    # (it layers its own retries), /query uses the retry-wrapped one, which
+    # is exactly what build_llm() returns.
+    if llm is not None:
+        app.chat_model = app.llm = llm
+    else:
+        app.chat_model = build_chat_model(config)
+        app.llm = with_config_retry(app.chat_model, config)
     app.build_lock = threading.Lock()
     _rebuild_pipeline(app)
 
@@ -183,7 +190,7 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
             with current_app.build_lock:
                 document_agent = DocumentAgent.from_knowledge_base(
                     current_app.knowledge_base,
-                    current_app.llm,
+                    current_app.chat_model,
                     current_app.rag_config,
                 )
             answer = document_agent.ask(question)
