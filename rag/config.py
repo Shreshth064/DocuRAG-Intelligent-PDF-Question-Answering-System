@@ -19,6 +19,8 @@ class RAGConfig:
     retriever_k: int = 4
     retriever_fetch_k: int = 10
     retriever_lambda_mult: float = 0.5
+    # The agent's summarize_document tool sweeps more chunks than a QA lookup.
+    summary_k: int = 8
 
     @property
     def search_kwargs(self) -> dict:

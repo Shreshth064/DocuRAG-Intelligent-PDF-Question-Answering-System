@@ -18,7 +18,13 @@ from langchain_google_genai.chat_models import (
 )
 
 from rag import RAGConfig
-from rag.llm import TRANSIENT_ERRORS, build_llm, with_transient_retry
+from rag.llm import (
+    TRANSIENT_ERRORS,
+    build_chat_model,
+    build_llm,
+    with_config_retry,
+    with_transient_retry,
+)
 
 
 class FlakyLLM:
@@ -113,6 +119,25 @@ def test_build_llm_wraps_the_configured_model_in_a_bounded_retry(monkeypatch):
     assert llm.max_attempt_number == 4
     assert llm.retry_exception_types == TRANSIENT_ERRORS
     assert llm.exponential_jitter_params == {"initial": 0.5, "max": 5}
+
+
+def test_build_chat_model_is_the_bare_tool_capable_client(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key-not-used")
+    config = RAGConfig()
+
+    model = build_chat_model(config)
+
+    assert isinstance(model, ChatGoogleGenerativeAI)
+    assert model.model == config.llm_model
+    assert model.max_retries == 1
+    assert hasattr(model, "bind_tools")
+
+
+def test_with_config_retry_defaults_the_config():
+    retried = with_config_retry(RunnableLambda(lambda x: x))
+
+    assert retried.max_attempt_number == RAGConfig().llm_max_attempts
+    assert retried.retry_exception_types == TRANSIENT_ERRORS
 
 
 def test_build_llm_defaults_the_config(monkeypatch):

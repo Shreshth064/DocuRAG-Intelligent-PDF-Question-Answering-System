@@ -5,9 +5,15 @@ and the LLM are both replaced with deterministic fakes, which is only
 possible because KnowledgeBase and RAGPipeline take them as arguments.
 """
 
+from typing import Any
+
 import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 from rag import RAGConfig, RAGPipeline
 
@@ -68,6 +74,42 @@ class FakeLLM:
     @property
     def rendered_prompt(self) -> str:
         return self.last_prompt.to_string()
+
+
+class ScriptedChatModel(BaseChatModel):
+    """A tool-calling chat model that replays a fixed script of replies.
+
+    Each call pops the next AIMessage, so a test can script "call tool X
+    with these args" followed by a final answer, and drive a real
+    AgentExecutor end to end without a network. A scripted exception is
+    raised instead of returned, to simulate a failing API call. Every prompt
+    it receives is recorded so tests can assert that tool results were fed
+    back to it.
+    """
+
+    script: list[Any]  # AIMessage replies, or exceptions to raise
+    prompts: list = Field(default_factory=list)
+    bound_tools: list = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = [tool.name for tool in tools]
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.prompts.append(messages)
+        reply = self.script.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return ChatResult(generations=[ChatGeneration(message=reply)])
+
+
+def tool_call(name: str, call_id: str = "call_1", **args) -> AIMessage:
+    """An assistant turn that asks the agent to run one tool."""
+    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
 
 
 class RaisingRedis:

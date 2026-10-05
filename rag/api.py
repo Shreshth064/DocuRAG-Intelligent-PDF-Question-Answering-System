@@ -14,11 +14,12 @@ from flask import Flask, current_app, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
+from .agent import DocumentAgent
 from .cache import QueryCache
 from .config import RAGConfig
 from .ingestion import DocumentIngestor
 from .knowledge_base import KnowledgeBase
-from .llm import build_llm
+from .llm import build_chat_model, with_config_retry
 from .pipeline import RAGPipeline
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -97,7 +98,14 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
     # from_env never raises: an unreachable Redis yields a disabled cache, so
     # a cache outage cannot crash startup.
     app.query_cache = query_cache if query_cache is not None else QueryCache.from_env()
-    app.llm = llm if llm is not None else build_llm(config)
+    # One client, two views: /agent needs the bare chat model to bind tools
+    # (it layers its own retries), /query uses the retry-wrapped one, which
+    # is exactly what build_llm() returns.
+    if llm is not None:
+        app.chat_model = app.llm = llm
+    else:
+        app.chat_model = build_chat_model(config)
+        app.llm = with_config_retry(app.chat_model, config)
     app.build_lock = threading.Lock()
     _rebuild_pipeline(app)
 
@@ -131,8 +139,7 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
 
         return jsonify({"chunks": len(chunks)}), 201
 
-    @app.post("/query")
-    def query():
+    def _question_for_populated_store() -> str:
         payload = request.get_json(silent=True) or {}
         question = payload.get("question")
         if not isinstance(question, str) or not question.strip():
@@ -140,6 +147,11 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
 
         if not current_app.knowledge_base.is_populated:
             raise StoreNotReady()
+        return question
+
+    @app.post("/query")
+    def query():
+        question = _question_for_populated_store()
 
         cache = current_app.query_cache
         store_id = current_app.knowledge_base.fingerprint
@@ -163,6 +175,38 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
         cache.set(question, store_id, body)
         current_app.logger.info("cache miss; computed and stored answer")
         return jsonify(body), 200
+
+    @app.post("/agent")
+    def agent():
+        """The agentic path: the LLM chooses and chains document-scoped tools.
+
+        Built per request (binding tools is cheap) so the agent always wraps
+        the current store, even straight after a re-upload. Not cached: the
+        tool trace is part of the response and is worth seeing fresh.
+        """
+        question = _question_for_populated_store()
+
+        try:
+            with current_app.build_lock:
+                document_agent = DocumentAgent.from_knowledge_base(
+                    current_app.knowledge_base,
+                    current_app.chat_model,
+                    current_app.rag_config,
+                )
+            answer = document_agent.ask(question)
+        except Exception as exc:
+            current_app.logger.exception("agent query failed")
+            raise ApiError("failed to answer question") from exc
+
+        return jsonify(
+            {
+                "answer": answer.text,
+                "tools_used": answer.tools_used,
+                "steps": [
+                    {"tool": step.tool, "input": step.input} for step in answer.steps
+                ],
+            }
+        ), 200
 
     @app.errorhandler(ApiError)
     def handle_api_error(exc: ApiError):

@@ -285,26 +285,154 @@ def test_unexpected_error_is_masked_as_500(client, monkeypatch):
 
 
 def test_default_llm_is_constructed_when_none_injected(config, embeddings, monkeypatch):
-    # Cover the production branch that builds the real (retrying) Gemini
-    # client, without a key or network, by swapping the factory it calls.
-    built = object()
+    # Cover the production branch that builds the real Gemini client, without
+    # a key or network, by swapping the factory it calls.
+    from langchain_core.runnables import RunnableLambda
+    from langchain_core.runnables.retry import RunnableRetry
+
+    from rag.cache import QueryCache
+    from rag.llm import TRANSIENT_ERRORS
+
+    built = RunnableLambda(lambda prompt: prompt)
     received = {}
 
-    def fake_build_llm(cfg):
+    def fake_build_chat_model(cfg):
         received["config"] = cfg
         return built
 
-    from rag.cache import QueryCache
-
-    monkeypatch.setattr("rag.api.build_llm", fake_build_llm)
+    monkeypatch.setattr("rag.api.build_chat_model", fake_build_chat_model)
     knowledge_base = KnowledgeBase(config, embeddings=embeddings)
 
     app = create_app(
         config=config, knowledge_base=knowledge_base, query_cache=QueryCache(None)
     )
 
-    assert app.llm is built
     assert received["config"] is config
+    # /agent gets the bare client; /query gets it retry-wrapped, as build_llm does.
+    assert app.chat_model is built
+    assert isinstance(app.llm, RunnableRetry)
+    assert app.llm.bound is built
+    assert app.llm.retry_exception_types == TRANSIENT_ERRORS
+
+
+def test_agent_works_with_the_default_production_wiring(config, embeddings, monkeypatch):
+    """Regression: /agent must bind tools to the bare chat model, not to the
+    retry-wrapped one /query uses (which has no bind_tools)."""
+    from conftest import ScriptedChatModel, tool_call
+    from langchain_core.messages import AIMessage
+
+    from rag.cache import QueryCache
+
+    model = ScriptedChatModel(
+        script=[tool_call("calculator", expression="2 + 2"), AIMessage(content="4")]
+    )
+    monkeypatch.setattr("rag.api.build_chat_model", lambda cfg: model)
+    client = create_app(
+        config=config,
+        knowledge_base=KnowledgeBase(config, embeddings=embeddings),
+        query_cache=QueryCache(None),
+    ).test_client()
+    client.post(
+        "/upload",
+        data={"file": (io.BytesIO(_pdf_bytes()), "doc.pdf")},
+        content_type="multipart/form-data",
+    )
+
+    response = client.post("/agent", json={"question": "2 + 2?"})
+
+    assert response.status_code == 200
+    assert response.get_json()["tools_used"] == ["calculator"]
+    assert model.bound_tools == [
+        "search_documents",
+        "get_citations",
+        "summarize_document",
+        "calculator",
+    ]
+
+
+# --- /agent ---
+
+@pytest.fixture
+def make_agent_client(config, embeddings):
+    """An offline app whose LLM replays a scripted tool-calling conversation."""
+    from conftest import ScriptedChatModel
+
+    from rag.cache import QueryCache
+
+    def _make(script):
+        llm = ScriptedChatModel(script=list(script))
+        app = create_app(
+            config=config,
+            knowledge_base=KnowledgeBase(config, embeddings=embeddings),
+            llm=llm,
+            query_cache=QueryCache(None),
+        )
+        return app.test_client(), llm
+
+    return _make
+
+
+def test_agent_before_any_upload_is_404(make_agent_client):
+    client, _ = make_agent_client([])
+
+    response = client.post("/agent", json={"question": "anything"})
+
+    assert response.status_code == 404
+
+
+def test_agent_missing_question_is_400(make_agent_client):
+    client, _ = make_agent_client([])
+
+    response = client.post("/agent", json={})
+
+    assert response.status_code == 400
+
+
+def test_agent_after_upload_chooses_a_tool_and_answers(make_agent_client):
+    from conftest import tool_call
+    from langchain_core.messages import AIMessage
+
+    client, llm = make_agent_client(
+        [
+            tool_call("search_documents", query="gradient descent"),
+            AIMessage(content="Deep learning uses gradient descent."),
+        ]
+    )
+    client.post(
+        "/upload",
+        data={"file": (io.BytesIO(_pdf_bytes()), "doc.pdf")},
+        content_type="multipart/form-data",
+    )
+
+    response = client.post("/agent", json={"question": "What does it use?"})
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "answer": "Deep learning uses gradient descent.",
+        "tools_used": ["search_documents"],
+        "steps": [{"tool": "search_documents", "input": {"query": "gradient descent"}}],
+    }
+    # The uploaded document's text reached the LLM as the tool result.
+    second_turn = "\n".join(str(message.content) for message in llm.prompts[1])
+    assert "gradient descent" in second_turn
+
+
+def test_agent_failure_is_500(make_agent_client, monkeypatch):
+    client, _ = make_agent_client([])
+    client.post(
+        "/upload",
+        data={"file": (io.BytesIO(_pdf_bytes()), "doc.pdf")},
+        content_type="multipart/form-data",
+    )
+
+    def boom(self, question):
+        raise RuntimeError("LLM unavailable")
+
+    monkeypatch.setattr("rag.agent.DocumentAgent.ask", boom)
+    response = client.post("/agent", json={"question": "anything"})
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "failed to answer question"}
 
 
 # --- routing ---
