@@ -18,6 +18,7 @@ from .cache import QueryCache
 from .config import RAGConfig
 from .ingestion import DocumentIngestor
 from .knowledge_base import KnowledgeBase
+from .llm import build_llm
 from .pipeline import RAGPipeline
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -96,12 +97,7 @@ def create_app(config=None, knowledge_base=None, llm=None, query_cache=None) -> 
     # from_env never raises: an unreachable Redis yields a disabled cache, so
     # a cache outage cannot crash startup.
     app.query_cache = query_cache if query_cache is not None else QueryCache.from_env()
-    if llm is not None:
-        app.llm = llm
-    else:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        app.llm = ChatGoogleGenerativeAI(model=config.llm_model)
+    app.llm = llm if llm is not None else build_llm(config)
     app.build_lock = threading.Lock()
     _rebuild_pipeline(app)
 
