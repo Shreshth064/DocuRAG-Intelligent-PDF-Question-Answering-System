@@ -257,8 +257,15 @@ document(s)**:
     collaborators by injection, like `RAGPipeline`.
     `from_knowledge_base()` wires the real ones, and `as_tools()` exposes
     them as LangChain `StructuredTool`s.
--   `build_agent(llm, tools)` returns the `AgentExecutor`. The loop is
-    capped at `max_iterations` so a confused agent can't spin forever.
+-   `build_agent(llm, tools, config)` returns the `AgentExecutor`. The
+    loop is capped at `max_iterations` so a confused agent can't spin
+    forever.
+-   The tools are bound to the bare chat model from
+    `rag.llm.build_chat_model()`. `build_llm()`'s retry wrapper can't
+    bind tools, so the same 429/5xx retry (attempts and waits from
+    `RAGConfig`) is applied to the agent runnable instead. Each LLM turn
+    is retried on its own, so a 503 halfway through a run never re-runs
+    tool calls that already succeeded.
     `DocumentAgent.from_config()` / `from_knowledge_base()` are factories
     consistent with the rest of the package.
 -   `DocumentAgent.ask()` returns an immutable `AgentAnswer` that carries
@@ -753,7 +760,7 @@ docker compose down -v
 
 The pipeline takes its retriever and LLM as constructor arguments, so the
 whole suite runs against fakes --- **no API keys, no network calls, no
-cost**. 146 tests, 100% branch coverage of the `rag/` package, under a
+cost**. 167 tests, 100% branch coverage of the `rag/` package, under a
 second to run.
 
 ### Install and run
