@@ -391,7 +391,6 @@ I could not find the answer in the document.
   Flask                            REST API
   pytest                           Test suite
   pytest-cov                       Coverage measurement
-  GitHub Actions                   Continuous integration
 
 ------------------------------------------------------------------------
 
@@ -695,7 +694,7 @@ because Redis persists to the `redis-data` volume (`--appendonly yes`).
 ### Run the tests in the image
 
 The `test` stage layers the dev dependencies and the suite on top of the
-runtime image, so CI runs exactly what ships:
+runtime image, so you run the tests against exactly what ships:
 
 ``` bash
 docker compose run --rm test
@@ -731,7 +730,7 @@ docker compose down -v
 ### Image design notes
 
 -   **Base:** `python:3.12-slim-bookworm`, pinned. 3.12 sits in the
-    middle of the 3.11--3.14 CI matrix and has the most dependable
+    middle of the supported 3.11--3.14 range and has the most dependable
     prebuilt wheels for `chromadb`'s tree (`onnxruntime`,
     `pydantic-core`); on 3.13/3.14 a missing wheel forces a source build.
 -   **Multi-stage:** a builder installs dependencies into `/opt/venv`
@@ -818,13 +817,6 @@ LangChain or Chroma **fails the build** instead of scrolling past. Known
 third-party warnings are explicitly allow-listed with a comment
 explaining each one.
 
-### Continuous integration
-
-[`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs the
-suite on every push and pull request across Python 3.11, 3.12, 3.13 and 3.14.
-No secrets are configured in CI on purpose --- if a test ever needs an
-API key, the build breaks, which keeps the suite honest.
-
 ------------------------------------------------------------------------
 
 # 🔄 Complete Workflow
@@ -893,7 +885,7 @@ application development:
 -   Separation of concerns --- one engine, three interchangeable frontends
 -   Centralised configuration instead of scattered constants
 -   Unit testing with pytest --- fixtures, markers, parametrised doubles
--   100% branch coverage of the core package, enforced offline in CI
+-   100% branch coverage of the core package, enforced offline
 -   Warnings-as-errors so upstream deprecations fail the build
 -   Type hints throughout
 
